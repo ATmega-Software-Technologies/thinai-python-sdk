@@ -143,6 +143,7 @@ All of them inherit from `thinai.ThinaiError`.
 ## Good to know
 
 - **No authentication.** Anyone on the same Wi-Fi can use the phone's models while sharing is on. Only enable it on networks you trust.
+- **Security issues.** Please report them privately. See [SECURITY.md](SECURITY.md).
 - **One request at a time.** The phone processes requests in a queue, so concurrent calls wait. Cancelling a request on the client doesn't stop generation on the phone.
 - **`/api/chat` and `/api/generate` can return engine errors as text.** For example, "request exceeds the available context size" may arrive as the reply content instead of an HTTP error.
 - **`num_ctx` only works on `/api/*` routes.** The OpenAI-compatible `/v1/chat/completions` always uses the context size set in the app.
