@@ -9,7 +9,9 @@ from __future__ import annotations
 import dataclasses
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Type, TypeVar
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Type, TypeVar
+
+from ._images import ImageInput, image_part
 
 
 def _opt_int(value: Any) -> Optional[int]:
@@ -59,14 +61,16 @@ class Message:
     tool_calls: List[ToolCall] = field(default_factory=list)
     name: Optional[str] = None
     """For ``role="tool"`` messages: the name of the tool that produced this result."""
+    images: List[ImageInput] = field(default_factory=list, repr=False)
+    """Images for a vision model: file paths, raw bytes or ``data:image/...`` URIs."""
 
     @classmethod
     def system(cls, content: str) -> Message:
         return cls(role="system", content=content)
 
     @classmethod
-    def user(cls, content: str) -> Message:
-        return cls(role="user", content=content)
+    def user(cls, content: str, images: Optional[Sequence[ImageInput]] = None) -> Message:
+        return cls(role="user", content=content, images=list(images or []))
 
     @classmethod
     def assistant(cls, content: str) -> Message:
@@ -86,7 +90,12 @@ class Message:
         )
 
     def to_dict(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {"role": self.role, "content": self.content}
+        content: Any = self.content
+        if self.images:
+            # The phone reads images only from OpenAI-style content parts.
+            parts: List[Dict[str, Any]] = [{"type": "text", "text": self.content or ""}]
+            content = parts + [image_part(image) for image in self.images]
+        out: Dict[str, Any] = {"role": self.role, "content": content}
         if self.tool_calls:
             out["tool_calls"] = [t.to_dict() for t in self.tool_calls]
         if self.name:
@@ -307,3 +316,5 @@ class Server:
     port: int
     base_url: str
     models: List[str] = field(default_factory=list)
+    auth_required: bool = False
+    """The server asked for a bearer token (LAN sharing is always token-protected)."""

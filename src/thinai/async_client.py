@@ -22,6 +22,7 @@ import httpx
 
 from . import _base
 from ._base import DEFAULT_PORT, DEFAULT_TIMEOUT, FINGERPRINT, MessagesInput
+from ._images import ImageInput
 from .discovery import DEFAULT_PROBE_TIMEOUT, afind_server
 from .errors import DiscoveryError
 from .types import (
@@ -157,7 +158,7 @@ class AsyncThinai:
     # -- models --------------------------------------------------------------------------------
 
     async def is_thinai(self) -> bool:
-        """True if the server answers like a running Thinai app."""
+        """True if the server answers like a running Thinai app (with or without a token)."""
         try:
             await self.connect()
             response = await self._http.get(
@@ -165,7 +166,18 @@ class AsyncThinai:
             )
         except (httpx.HTTPError, DiscoveryError):
             return False
-        return response.status_code == 200 and response.text.startswith(FINGERPRINT)
+        return _base.is_thinai_reply(
+            response.status_code, response.headers, response.content[: len(FINGERPRINT)]
+        )
+
+    async def health(self) -> bool:
+        """True if the server is up (``GET /healthz``). Needs no token; never raises."""
+        try:
+            await self.connect()
+            response = await self._http.get(self.base_url + "/healthz", timeout=5.0)
+            return response.status_code == 200 and response.json().get("status") == "ok"
+        except (httpx.HTTPError, DiscoveryError, ValueError, AttributeError):
+            return False
 
     async def models(self) -> List[Model]:
         data = (await self._request("GET", "/api/tags")).json()
@@ -192,6 +204,7 @@ class AsyncThinai:
         model: Optional[str] = ...,
         stream: Literal[False] = ...,
         tools: Optional[Sequence[Mapping[str, Any]]] = ...,
+        images: Optional[Sequence[ImageInput]] = ...,
         options: Optional[Mapping[str, Any]] = ...,
         temperature: Optional[float] = ...,
         num_ctx: Optional[int] = ...,
@@ -199,6 +212,8 @@ class AsyncThinai:
         num_predict: Optional[int] = ...,
         stop: Optional[Stop] = ...,
         num_gpu: Optional[int] = ...,
+        top_k: Optional[int] = ...,
+        think: Optional[bool] = ...,
     ) -> ChatResponse: ...
 
     @overload
@@ -209,6 +224,7 @@ class AsyncThinai:
         model: Optional[str] = ...,
         stream: Literal[True],
         tools: Optional[Sequence[Mapping[str, Any]]] = ...,
+        images: Optional[Sequence[ImageInput]] = ...,
         options: Optional[Mapping[str, Any]] = ...,
         temperature: Optional[float] = ...,
         num_ctx: Optional[int] = ...,
@@ -216,6 +232,8 @@ class AsyncThinai:
         num_predict: Optional[int] = ...,
         stop: Optional[Stop] = ...,
         num_gpu: Optional[int] = ...,
+        top_k: Optional[int] = ...,
+        think: Optional[bool] = ...,
     ) -> AsyncIterator[ChatChunk]: ...
 
     async def chat(
@@ -225,6 +243,7 @@ class AsyncThinai:
         model: Optional[str] = None,
         stream: bool = False,
         tools: Optional[Sequence[Mapping[str, Any]]] = None,
+        images: Optional[Sequence[ImageInput]] = None,
         options: Optional[Mapping[str, Any]] = None,
         temperature: Optional[float] = None,
         num_ctx: Optional[int] = None,
@@ -232,12 +251,14 @@ class AsyncThinai:
         num_predict: Optional[int] = None,
         stop: Optional[Stop] = None,
         num_gpu: Optional[int] = None,
+        top_k: Optional[int] = None,
+        think: Optional[bool] = None,
     ) -> Union[ChatResponse, AsyncIterator[ChatChunk]]:
         """See :meth:`thinai.Thinai.chat`. With ``stream=True``, ``await`` then ``async for``."""
         payload = _base.compact(
             {
                 "model": await self._resolve_model(model),
-                "messages": _base.normalize_messages(messages),
+                "messages": _base.attach_images(_base.normalize_messages(messages), images),
                 "stream": stream,
                 "tools": list(tools) if tools else None,
                 "options": _base.build_options(
@@ -248,7 +269,9 @@ class AsyncThinai:
                     num_predict=num_predict,
                     stop=stop if isinstance(stop, (str, type(None))) else list(stop),
                     num_gpu=num_gpu,
+                    top_k=top_k,
                 ),
+                "think": think,
             }
         )
         if stream:
@@ -272,6 +295,8 @@ class AsyncThinai:
         num_predict: Optional[int] = ...,
         stop: Optional[Stop] = ...,
         num_gpu: Optional[int] = ...,
+        top_k: Optional[int] = ...,
+        think: Optional[bool] = ...,
     ) -> GenerateResponse: ...
 
     @overload
@@ -288,6 +313,8 @@ class AsyncThinai:
         num_predict: Optional[int] = ...,
         stop: Optional[Stop] = ...,
         num_gpu: Optional[int] = ...,
+        top_k: Optional[int] = ...,
+        think: Optional[bool] = ...,
     ) -> AsyncIterator[GenerateChunk]: ...
 
     async def generate(
@@ -303,6 +330,8 @@ class AsyncThinai:
         num_predict: Optional[int] = None,
         stop: Optional[Stop] = None,
         num_gpu: Optional[int] = None,
+        top_k: Optional[int] = None,
+        think: Optional[bool] = None,
     ) -> Union[GenerateResponse, AsyncIterator[GenerateChunk]]:
         """See :meth:`thinai.Thinai.generate`."""
         payload = _base.compact(
@@ -318,7 +347,9 @@ class AsyncThinai:
                     num_predict=num_predict,
                     stop=stop if isinstance(stop, (str, type(None))) else list(stop),
                     num_gpu=num_gpu,
+                    top_k=top_k,
                 ),
+                "think": think,
             }
         )
         if stream:

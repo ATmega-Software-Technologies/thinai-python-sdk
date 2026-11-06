@@ -21,6 +21,7 @@ import httpx
 
 from . import _base
 from ._base import DEFAULT_PORT, DEFAULT_TIMEOUT, FINGERPRINT, MessagesInput
+from ._images import ImageInput
 from .discovery import DEFAULT_PROBE_TIMEOUT, find_server
 from .types import (
     ChatChunk,
@@ -47,11 +48,13 @@ class Thinai:
     >>> client.chat("Hello!").content
 
     Args:
-        host: IP, ``ip:port`` or URL of the phone. Falls back to ``$THINAI_HOST``,
-            then to scanning the local network.
+        host: IP, ``ip:port`` or URL of the phone, including the app's Public URL
+            (``https://....trycloudflare.com``). Falls back to ``$THINAI_HOST``, then to
+            scanning the local network.
         port: Server port shown in the app (default 11434).
         model: Default model id. When unset, requests use the model loaded on the phone.
-        api_key: Bearer token, if the server requires one (``$THINAI_API_KEY``).
+        api_key: API token from the app's Server page (``$THINAI_API_KEY``). Required for
+            LAN sharing and the Public URL; not needed on the phone itself.
         timeout: httpx timeout. Default: 5s to connect, no read limit.
         discover_timeout: Per-host probe timeout when scanning the network.
         headers: Extra headers sent with every request.
@@ -136,12 +139,22 @@ class Thinai:
     # -- models --------------------------------------------------------------------------------
 
     def is_thinai(self) -> bool:
-        """True if ``base_url`` answers like a running Thinai app."""
+        """True if ``base_url`` answers like a running Thinai app (with or without a token)."""
         try:
             response = self._http.get(self.base_url + "/", headers=self._headers, timeout=5.0)
         except httpx.HTTPError:
             return False
-        return response.status_code == 200 and response.text.startswith(FINGERPRINT)
+        return _base.is_thinai_reply(
+            response.status_code, response.headers, response.content[: len(FINGERPRINT)]
+        )
+
+    def health(self) -> bool:
+        """True if the server is up (``GET /healthz``). Needs no token; never raises."""
+        try:
+            response = self._http.get(self.base_url + "/healthz", timeout=5.0)
+            return response.status_code == 200 and response.json().get("status") == "ok"
+        except (httpx.HTTPError, ValueError, AttributeError):
+            return False
 
     def models(self) -> List[Model]:
         """Models installed on the phone."""
@@ -171,6 +184,7 @@ class Thinai:
         model: Optional[str] = ...,
         stream: Literal[False] = ...,
         tools: Optional[Sequence[Mapping[str, Any]]] = ...,
+        images: Optional[Sequence[ImageInput]] = ...,
         options: Optional[Mapping[str, Any]] = ...,
         temperature: Optional[float] = ...,
         num_ctx: Optional[int] = ...,
@@ -178,6 +192,8 @@ class Thinai:
         num_predict: Optional[int] = ...,
         stop: Optional[Stop] = ...,
         num_gpu: Optional[int] = ...,
+        top_k: Optional[int] = ...,
+        think: Optional[bool] = ...,
     ) -> ChatResponse: ...
 
     @overload
@@ -188,6 +204,7 @@ class Thinai:
         model: Optional[str] = ...,
         stream: Literal[True],
         tools: Optional[Sequence[Mapping[str, Any]]] = ...,
+        images: Optional[Sequence[ImageInput]] = ...,
         options: Optional[Mapping[str, Any]] = ...,
         temperature: Optional[float] = ...,
         num_ctx: Optional[int] = ...,
@@ -195,6 +212,8 @@ class Thinai:
         num_predict: Optional[int] = ...,
         stop: Optional[Stop] = ...,
         num_gpu: Optional[int] = ...,
+        top_k: Optional[int] = ...,
+        think: Optional[bool] = ...,
     ) -> Iterator[ChatChunk]: ...
 
     def chat(
@@ -204,6 +223,7 @@ class Thinai:
         model: Optional[str] = None,
         stream: bool = False,
         tools: Optional[Sequence[Mapping[str, Any]]] = None,
+        images: Optional[Sequence[ImageInput]] = None,
         options: Optional[Mapping[str, Any]] = None,
         temperature: Optional[float] = None,
         num_ctx: Optional[int] = None,
@@ -211,6 +231,8 @@ class Thinai:
         num_predict: Optional[int] = None,
         stop: Optional[Stop] = None,
         num_gpu: Optional[int] = None,
+        top_k: Optional[int] = None,
+        think: Optional[bool] = None,
     ) -> Union[ChatResponse, Iterator[ChatChunk]]:
         """Chat with a model on the phone (``/api/chat``).
 
@@ -220,6 +242,9 @@ class Thinai:
             model: Model id. Default: the client's ``model``, else the loaded model.
             stream: Yield :class:`ChatChunk` objects as tokens arrive.
             tools: Tool definitions in OpenAI format.
+            images: Images for a vision model (file paths, bytes or ``data:image/...``
+                URIs), attached to the last user message. The model must have its image
+                encoder loaded on the phone, or the server answers 400.
             options: Raw Ollama-style options; keyword arguments below override it.
             temperature: 0.0-2.0.
             num_ctx: Context window; clamped by the phone to ``show().context_cap``.
@@ -227,11 +252,13 @@ class Thinai:
             num_predict: Maximum tokens to generate.
             stop: Stop sequence or up to 4 sequences.
             num_gpu: ``0`` forces CPU inference.
+            top_k: Top-K sampling. Unset values fall back to the model's settings in the app.
+            think: Turn a thinking model's reasoning on or off.
         """
         payload = _base.compact(
             {
                 "model": self._resolve_model(model),
-                "messages": _base.normalize_messages(messages),
+                "messages": _base.attach_images(_base.normalize_messages(messages), images),
                 "stream": stream,
                 "tools": list(tools) if tools else None,
                 "options": _base.build_options(
@@ -242,7 +269,9 @@ class Thinai:
                     num_predict=num_predict,
                     stop=stop if isinstance(stop, (str, type(None))) else list(stop),
                     num_gpu=num_gpu,
+                    top_k=top_k,
                 ),
+                "think": think,
             }
         )
         if stream:
@@ -265,6 +294,8 @@ class Thinai:
         num_predict: Optional[int] = ...,
         stop: Optional[Stop] = ...,
         num_gpu: Optional[int] = ...,
+        top_k: Optional[int] = ...,
+        think: Optional[bool] = ...,
     ) -> GenerateResponse: ...
 
     @overload
@@ -281,6 +312,8 @@ class Thinai:
         num_predict: Optional[int] = ...,
         stop: Optional[Stop] = ...,
         num_gpu: Optional[int] = ...,
+        top_k: Optional[int] = ...,
+        think: Optional[bool] = ...,
     ) -> Iterator[GenerateChunk]: ...
 
     def generate(
@@ -296,6 +329,8 @@ class Thinai:
         num_predict: Optional[int] = None,
         stop: Optional[Stop] = None,
         num_gpu: Optional[int] = None,
+        top_k: Optional[int] = None,
+        think: Optional[bool] = None,
     ) -> Union[GenerateResponse, Iterator[GenerateChunk]]:
         """Complete a single prompt (``/api/generate``). Options match :meth:`chat`."""
         payload = _base.compact(
@@ -311,7 +346,9 @@ class Thinai:
                     num_predict=num_predict,
                     stop=stop if isinstance(stop, (str, type(None))) else list(stop),
                     num_gpu=num_gpu,
+                    top_k=top_k,
                 ),
+                "think": think,
             }
         )
         if stream:

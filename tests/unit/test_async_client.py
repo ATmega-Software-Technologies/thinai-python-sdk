@@ -69,3 +69,20 @@ async def test_lazy_discovery(monkeypatch: pytest.MonkeyPatch) -> None:
     assert client.base_url == "http://10.0.0.5:11434"
     assert len(calls) == 1
     assert str(recorder.requests[0].url) == "http://10.0.0.5:11434/api/tags"
+
+
+async def test_async_health_and_images(make_async_client: MakeAsync) -> None:
+    done = {"model": "m", "message": {"role": "assistant", "content": "a cat"}, "done": True}
+    recorder = Recorder(
+        {
+            "/healthz": httpx.Response(200, json={"status": "ok"}),
+            "/api/chat": httpx.Response(200, json=done),
+        }
+    )
+    client = make_async_client(recorder, model="m")
+    assert await client.health() is True
+    response = await client.chat("what?", images=[b"\xff\xd8\xff"], think=False)
+    assert response.content == "a cat"
+    sent = recorder.last_body("/api/chat")
+    assert sent["think"] is False
+    assert sent["messages"][0]["content"][1]["image_url"]["url"].startswith("data:image/jpeg")

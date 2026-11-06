@@ -1,12 +1,13 @@
-"""Command line: ``thinai discover``, ``thinai models``, ``thinai chat "hi"``."""
+"""Command line: ``thinai discover``, ``thinai health``, ``thinai models``, ``thinai chat "hi"``."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from typing import List, Optional
 
-from ._base import DEFAULT_PORT
+from ._base import DEFAULT_PORT, ENV_API_KEY
 from ._version import __version__
 from .client import Thinai
 from .discovery import DEFAULT_PROBE_TIMEOUT, discover
@@ -35,11 +36,21 @@ def _parser() -> argparse.ArgumentParser:
     scan.add_argument(
         "--subnet", action="append", help="CIDR to scan, e.g. 192.168.1.0/24 (repeatable)"
     )
+    scan.add_argument("--api-key", help="API token, to list models (default: $THINAI_API_KEY)")
 
-    for name, help_text in (("models", "list installed models"), ("chat", "send one prompt")):
+    for name, help_text in (
+        ("health", "check that the server is up (GET /healthz)"),
+        ("models", "list installed models"),
+        ("chat", "send one prompt"),
+    ):
         cmd = sub.add_parser(name, help=help_text)
-        cmd.add_argument("--host", help="phone IP or URL (default: $THINAI_HOST, then scan)")
+        cmd.add_argument(
+            "--host", help="phone IP, URL or Public URL (default: $THINAI_HOST, then scan)"
+        )
         cmd.add_argument("--port", type=int, default=DEFAULT_PORT)
+        cmd.add_argument(
+            "--api-key", help="API token from the app's Server page (default: $THINAI_API_KEY)"
+        )
         if name == "chat":
             cmd.add_argument("prompt", nargs="+")
             cmd.add_argument("--model")
@@ -53,15 +64,25 @@ def main(argv: Optional[List[str]] = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "discover":
-            servers = discover(port=args.port, timeout=args.timeout, subnets=args.subnet)
+            servers = discover(
+                port=args.port,
+                timeout=args.timeout,
+                subnets=args.subnet,
+                api_key=args.api_key or os.environ.get(ENV_API_KEY),
+            )
             if not servers:
                 print("No Thinai servers found.", file=sys.stderr)
                 return 1
             for server in servers:
-                print(f"{server.base_url}  models: {', '.join(server.models) or '-'}")
+                lock = "  (token required)" if server.auth_required else ""
+                print(f"{server.base_url}  models: {', '.join(server.models) or '-'}{lock}")
             return 0
 
-        with Thinai(args.host, args.port) as client:
+        with Thinai(args.host, args.port, api_key=args.api_key) as client:
+            if args.command == "health":
+                ok = client.health()
+                print(f"{client.base_url}: {'ok' if ok else 'unreachable'}")
+                return 0 if ok else 1
             if args.command == "models":
                 loaded = {m.name for m in client.running()}
                 for model in client.models():

@@ -263,3 +263,89 @@ def test_openai_helper(make_client: MakeClient) -> None:
     pytest.importorskip("openai")
     client = make_client(Recorder({})).openai()
     assert str(client.base_url) == f"{BASE}/v1/"
+
+
+def test_chat_images_top_k_think(make_client: MakeClient) -> None:
+    recorder = Recorder({"/api/chat": httpx.Response(200, json=CHAT_DONE)})
+    png = b"\x89PNG\r\n\x1a\n"
+    make_client(recorder, model="m").chat(
+        "describe", images=[png], top_k=40, think=False, temperature=0.1
+    )
+    sent = recorder.last_body("/api/chat")
+    assert sent["think"] is False
+    assert sent["options"] == {"temperature": 0.1, "top_k": 40}
+    content = sent["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "describe"}
+    assert content[1]["image_url"]["url"].startswith("data:image/png;base64,")
+
+
+def test_generate_think_omitted_when_unset(make_client: MakeClient) -> None:
+    done = {"model": "m", "response": "x", "done": True}
+    recorder = Recorder({"/api/generate": httpx.Response(200, json=done)})
+    make_client(recorder, model="m").generate("p", think=True, top_k=5)
+    assert recorder.last_body("/api/generate")["think"] is True
+    make_client(recorder, model="m").generate("p")
+    assert "think" not in recorder.last_body("/api/generate")
+
+
+def test_health(make_client: MakeClient) -> None:
+    recorder = Recorder({"/healthz": httpx.Response(200, json={"status": "ok"})})
+    client = make_client(recorder, api_key="secret")
+    assert client.health() is True
+    assert "authorization" not in recorder.requests[0].headers
+    assert make_client(Recorder({})).health() is False
+
+    def down(request: httpx.Request) -> Any:
+        raise httpx.ConnectError("refused")
+
+    assert make_client(down).health() is False
+
+
+def test_is_thinai_with_token_challenge(make_client: MakeClient) -> None:
+    challenge = httpx.Response(
+        401,
+        json={"error": "Missing or wrong API key."},
+        headers={"www-authenticate": 'Bearer realm="thinai"'},
+    )
+    assert make_client(Recorder({"/": challenge})).is_thinai() is True
+    ok = httpx.Response(200, text="Thinai is running. See /api/tags or /v1/models.")
+    assert make_client(Recorder({"/": ok})).is_thinai() is True
+    assert make_client(Recorder({"/": httpx.Response(200, text="Ollama")})).is_thinai() is False
+
+
+def test_missing_token_raises_auth_error(make_client: MakeClient) -> None:
+    from thinai import AuthenticationError
+
+    unauthorized = httpx.Response(
+        401,
+        json={"error": 'Missing or wrong API key. Send "Authorization: Bearer <token>".'},
+        headers={"www-authenticate": 'Bearer realm="thinai"'},
+    )
+    with pytest.raises(AuthenticationError, match="THINAI_API_KEY") as info:
+        make_client(Recorder({"/api/tags": unauthorized})).models()
+    assert info.value.status_code == 401
+
+
+def test_public_url_client() -> None:
+    seen = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"models": []})
+
+    client = Thinai(
+        "https://abc-def.trycloudflare.com",
+        api_key="tok",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+    assert client.base_url == "https://abc-def.trycloudflare.com"
+    client.models()
+    assert str(seen[0].url) == "https://abc-def.trycloudflare.com/api/tags"
+    assert seen[0].headers["authorization"] == "Bearer tok"
+
+
+def test_api_key_from_env(make_client: MakeClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("THINAI_API_KEY", "envtok")
+    recorder = Recorder({"/api/tags": httpx.Response(200, json={"models": []})})
+    make_client(recorder).models()
+    assert recorder.requests[0].headers["authorization"] == "Bearer envtok"
