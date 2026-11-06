@@ -39,6 +39,16 @@ def _lan(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, text="Thinai is running. See /api/tags or /v1/models.")
     if host == "10.0.0.4":
         return httpx.Response(200, text="Thinai is running.")
+    if host == "10.0.0.5":  # LAN sharing on: every route but /healthz needs a token
+        if request.headers.get("authorization") == "Bearer tok" and path == "/api/tags":
+            return httpx.Response(200, json={"models": [{"name": "gemma"}]})
+        return httpx.Response(
+            401,
+            json={"error": "Missing or wrong API key."},
+            headers={"www-authenticate": 'Bearer realm="thinai"'},
+        )
+    if host == "10.0.0.6":
+        return httpx.Response(401, headers={"www-authenticate": 'Basic realm="router"'})
     raise httpx.ConnectError("unreachable")
 
 
@@ -68,3 +78,11 @@ async def test_afind_server_raises_with_help(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr("thinai.discovery.adiscover", nothing)
     with pytest.raises(DiscoveryError, match="Share on local network"):
         await afind_server()
+
+
+async def test_adiscover_finds_token_protected_server() -> None:
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_lan)) as client:
+        servers = await adiscover(hosts=["10.0.0.5", "10.0.0.6"], http_client=client)
+        assert [(s.host, s.auth_required, s.models) for s in servers] == [("10.0.0.5", True, [])]
+        servers = await adiscover(hosts=["10.0.0.5"], api_key="tok", http_client=client)
+        assert servers[0].models == ["gemma"]

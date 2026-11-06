@@ -2,7 +2,8 @@
 
 The app doesn't advertise itself (no mDNS), so discovery probes ``GET /`` on
 every address of the local /24 subnet(s) and keeps the hosts whose reply starts
-with ``Thinai``.
+with ``Thinai``, or that answer 401 with the app's ``Bearer realm="thinai"``
+challenge (LAN sharing always requires an API token since app 2.6).
 """
 
 from __future__ import annotations
@@ -11,11 +12,11 @@ import asyncio
 import ipaddress
 import socket
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Coroutine, List, Optional, Sequence, Tuple, TypeVar
+from typing import Any, Coroutine, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 import httpx
 
-from ._base import DEFAULT_PORT, FINGERPRINT, normalize_base_url
+from ._base import DEFAULT_PORT, FINGERPRINT, build_headers, is_thinai_reply, normalize_base_url
 from .errors import DiscoveryError
 from .types import Server
 
@@ -82,33 +83,41 @@ async def _probe(
     semaphore: asyncio.Semaphore,
     with_models: bool,
     timeout: float,
+    headers: Dict[str, str],
 ) -> Optional[Server]:
     base_url = normalize_base_url(host, port)
     fingerprint = FINGERPRINT.encode()
     async with semaphore:
         try:
+            # No token on the probe: an open server answers 200 either way, and a
+            # protected one must answer 401 so it is recognised even with a wrong key.
             async with client.stream("GET", base_url + "/") as response:
-                if response.status_code != 200:
-                    return None
-                # Read only the first bytes: some LAN devices stream endlessly at "/".
+                status, response_headers = response.status_code, response.headers
                 head = b""
-                async for chunk in response.aiter_bytes():
-                    head += chunk
-                    if len(head) >= len(fingerprint):
-                        break
+                if status == 200:
+                    # Read only the first bytes: some LAN devices stream endlessly at "/".
+                    async for chunk in response.aiter_bytes():
+                        head += chunk
+                        if len(head) >= len(fingerprint):
+                            break
         except Exception:
             return None
-        if not head.startswith(fingerprint):
+        if not is_thinai_reply(status, response_headers, head):
             return None
 
         models: List[str] = []
-        if with_models:
+        if with_models and (status == 200 or headers):
             try:
-                tags = await client.get(base_url + "/api/tags", timeout=max(timeout, 3.0))
-                models = [str(m.get("name")) for m in tags.json().get("models", [])]
+                tags = await client.get(
+                    base_url + "/api/tags", headers=headers, timeout=max(timeout, 3.0)
+                )
+                if tags.status_code == 200:
+                    models = [str(m.get("name")) for m in tags.json().get("models", [])]
             except Exception:
                 pass
-    return Server(host=host, port=port, base_url=base_url, models=models)
+    return Server(
+        host=host, port=port, base_url=base_url, models=models, auth_required=status == 401
+    )
 
 
 def _sort_key(server: Server) -> Tuple[int, Any]:
@@ -127,6 +136,7 @@ async def adiscover(
     concurrency: int = DEFAULT_CONCURRENCY,
     with_models: bool = True,
     first: bool = False,
+    api_key: Optional[str] = None,
     http_client: Optional[httpx.AsyncClient] = None,
 ) -> List[Server]:
     """Scan the network for Thinai apps.
@@ -139,19 +149,22 @@ async def adiscover(
         concurrency: Maximum simultaneous probes.
         with_models: Also fetch each server's installed model names.
         first: Stop as soon as one server answers.
+        api_key: API token from the app's Server page, used to list models on
+            token-protected servers. Not needed to find them.
     """
     targets = list(hosts) if hosts is not None else candidate_hosts(subnets)
     if not targets:
         return []
 
     semaphore = asyncio.Semaphore(concurrency)
+    headers = build_headers(api_key, None)
     client = http_client or httpx.AsyncClient(
         timeout=httpx.Timeout(timeout),
         trust_env=False,  # never route LAN probes through an HTTP proxy
         limits=httpx.Limits(max_connections=concurrency, max_keepalive_connections=0),
     )
     tasks = [
-        asyncio.ensure_future(_probe(client, h, port, semaphore, with_models, timeout))
+        asyncio.ensure_future(_probe(client, h, port, semaphore, with_models, timeout, headers))
         for h in targets
     ]
     found: List[Server] = []
@@ -180,6 +193,7 @@ def discover(
     concurrency: int = DEFAULT_CONCURRENCY,
     with_models: bool = True,
     first: bool = False,
+    api_key: Optional[str] = None,
 ) -> List[Server]:
     """Blocking version of :func:`adiscover`. Safe to call from Jupyter."""
     return _run_sync(
@@ -191,6 +205,7 @@ def discover(
             concurrency=concurrency,
             with_models=with_models,
             first=first,
+            api_key=api_key,
         )
     )
 
@@ -198,7 +213,8 @@ def discover(
 _NOT_FOUND_HELP = (
     "No Thinai server found on port {port}. In the Thinai app open Server, press Start, "
     "turn on 'Share on local network', and make sure this computer is on the same Wi-Fi. "
-    "Or connect directly: Thinai(host='192.168.x.y'), or set THINAI_HOST."
+    "Or connect directly: Thinai(host='192.168.x.y') or the app's Public URL, "
+    "or set THINAI_HOST."
 )
 
 

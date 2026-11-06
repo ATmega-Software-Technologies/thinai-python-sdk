@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import httpx
 import pytest
 
@@ -11,7 +13,9 @@ from thinai import (
     StreamError,
 )
 from thinai._base import (
+    attach_images,
     build_options,
+    is_thinai_reply,
     normalize_base_url,
     normalize_messages,
     parse_ndjson_line,
@@ -26,7 +30,12 @@ from thinai._base import (
         (" 192.168.1.36 ", "http://192.168.1.36:11434"),
         ("192.168.1.36:8080", "http://192.168.1.36:8080"),
         ("http://192.168.1.36:11434/", "http://192.168.1.36:11434"),
-        ("https://phone.local/prefix/", "https://phone.local:11434/prefix"),
+        ("https://phone.local:8443/prefix/", "https://phone.local:8443/prefix"),
+        ("https://abc-def.trycloudflare.com", "https://abc-def.trycloudflare.com"),
+        ("https://abc-def.trycloudflare.com/", "https://abc-def.trycloudflare.com"),
+        ("abc-def.trycloudflare.com", "https://abc-def.trycloudflare.com"),
+        ("HTTPS://Phone.Example/", "https://phone.example"),
+        ("http://phone.local", "http://phone.local:11434"),
     ],
 )
 def test_normalize_base_url(host: str, expected: str) -> None:
@@ -63,7 +72,14 @@ def test_normalize_messages() -> None:
     ("response", "exc_type", "message"),
     [
         (httpx.Response(400, json={"error": "name is required"}), BadRequestError, "name is"),
-        (httpx.Response(401, json={"error": "unauthorized"}), AuthenticationError, "unauthorized"),
+        (httpx.Response(401, json={"error": "nope"}), AuthenticationError, "THINAI_API_KEY"),
+        (
+            httpx.Response(
+                401, json={"error": {"message": "Missing or wrong API key.", "type": "x"}}
+            ),
+            AuthenticationError,
+            "Missing or wrong API key",
+        ),
         (httpx.Response(404, text="Route not found"), NotFoundError, "Route not found"),
         (
             httpx.Response(500, json={"error": {"message": "boom", "type": "server_error"}}),
@@ -87,3 +103,44 @@ def test_parse_ndjson_line() -> None:
         parse_ndjson_line('{"error": "exceeds context", "done": true}')
     with pytest.raises(StreamError):
         parse_ndjson_line("not json")
+
+
+def test_is_thinai_reply() -> None:
+    challenge = {"www-authenticate": 'Bearer realm="thinai"'}
+    assert is_thinai_reply(200, {}, b"Thinai is running.")
+    assert not is_thinai_reply(200, {}, b"Ollama is running")
+    assert is_thinai_reply(401, challenge, b"")
+    assert not is_thinai_reply(401, {"www-authenticate": 'Basic realm="router"'}, b"")
+    assert not is_thinai_reply(404, challenge, b"Thinai")
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 8
+
+
+def test_attach_images_to_last_user_message(tmp_path: Path) -> None:
+    path = tmp_path / "cat.jpg"
+    path.write_bytes(b"\xff\xd8\xff\xe0")
+    messages = normalize_messages([Message.system("s"), Message.user("what is this?")])
+    out = attach_images(messages, [PNG, str(path), "data:image/webp;base64,AAAA"])
+    assert out[0] == {"role": "system", "content": "s"}
+    parts = out[1]["content"]
+    assert parts[0] == {"type": "text", "text": "what is this?"}
+    urls = [p["image_url"]["url"] for p in parts[1:]]
+    assert urls[0].startswith("data:image/png;base64,")
+    assert urls[1].startswith("data:image/jpeg;base64,")
+    assert urls[2] == "data:image/webp;base64,AAAA"
+    assert attach_images(messages, None) is messages
+
+
+def test_attach_images_rejects_remote_and_missing_user() -> None:
+    with pytest.raises(ValueError, match="remote"):
+        attach_images([{"role": "user", "content": "x"}], ["https://example.com/a.png"])
+    with pytest.raises(ValueError, match="user message"):
+        attach_images([{"role": "system", "content": "x"}], [PNG])
+
+
+def test_message_images_to_dict() -> None:
+    data = Message.user("look", images=[PNG]).to_dict()
+    assert data["content"][0] == {"type": "text", "text": "look"}
+    assert data["content"][1]["type"] == "image_url"
+    assert Message.user("plain").to_dict() == {"role": "user", "content": "plain"}
