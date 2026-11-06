@@ -5,13 +5,15 @@ build-backend = "hatchling.build"
 [project]
 name = "thinai"
 dynamic = ["version"]
-description = "Python SDK for Thinai: discover and use LLMs running on an Android phone over your local network."
+description = "Python SDK for Thinai: use LLMs running offline on an Android phone, over your Wi-Fi or the app's public URL."
 readme = "README.md"
 requires-python = ">=3.9"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Thinai", email = "dev.atmega@gmail.com" }]
-keywords = ["llm", "local-llm", "android", "ollama", "offline", "gguf", "lan", "sdk"]
+keywords = [
+    "llm", "local-llm", "android", "ollama", "openai", "offline", "gguf", "lan", "vision", "sdk",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -39,6 +41,7 @@ Homepage = "https://github.com/ATmega-Software-Technologies/thinai-python-sdk"
 Repository = "https://github.com/ATmega-Software-Technologies/thinai-python-sdk"
 Issues = "https://github.com/ATmega-Software-Technologies/thinai-python-sdk/issues"
 Changelog = "https://github.com/ATmega-Software-Technologies/thinai-python-sdk/blob/main/CHANGELOG.md"
+Documentation = "https://github.com/ATmega-Software-Technologies/thinai-python-sdk#readme"
 "Thinai app" = "https://play.google.com/store/apps/details?id=in.atmega.thinai"
 
 [dependency-groups]
